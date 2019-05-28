@@ -3,6 +3,7 @@
 import numpy as np
 import warnings
 from skimage.color import label2rgb
+from mtolib import moment_invariants
 
 
 def colour_labels(label_map):
@@ -107,6 +108,20 @@ def get_image_parameters(img, object_ids, sig_ancs, params,):
 
     return parameters
 
+"""Calculate an object's data matrix given the indices of its pixels"""
+def node_to_data_matrix(img, node_id, pixel_indices):
+    minX = np.min(pixel_indices[1])
+    minY = np.min(pixel_indices[0])
+    maxX = np.max(pixel_indices[1])
+    maxY = np.max(pixel_indices[0])
+    s = (maxX - minX + 1, maxY - minY + 1)
+    z = np.zeros(s)
+    for i in range(0, pixel_indices[1].shape[0]):
+        ix = pixel_indices[1][i]
+        iy = pixel_indices[0][i]
+        z[ix-minX][iy-minY] = img.data[iy, ix]
+    return np.asmatrix(z)
+
 
 def get_object_parameters(img, node_id, pixel_indices):
     """Calculate an object's parameters given the indices of its pixels"""
@@ -119,6 +134,14 @@ def get_object_parameters(img, node_id, pixel_indices):
     pixel_values -= max(np.min(pixel_values), 0)
 
     flux_sum = np.sum(pixel_values)
+    data_matrix = node_to_data_matrix(img, node_id, pixel_indices)
+
+    # Subtract min values if required
+    min_value = max(np.min(data_matrix), 0)
+    data_matrix -= min_value
+    with np.errstate(divide='ignore',invalid='ignore'):
+        invts = moment_invariants.calculateInvariants(3, data_matrix)
+        print(node_id, invts)
 
     # Handle situations where flux_sum is 0 because of minimum subtraction
     if flux_sum == 0:

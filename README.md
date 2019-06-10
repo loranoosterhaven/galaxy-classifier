@@ -1,2 +1,0 @@
-# galaxy-classifier
-Galaxy classification

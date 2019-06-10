@@ -1,5 +1,7 @@
 import mtolib.main as mto
 
+import numpy as np
+
 """Example program - using original settings"""
 
 # Get the input image and parameters
@@ -13,6 +15,12 @@ mt = mto.build_max_tree(processed_image, params)
 
 # Filter the tree and find objects
 id_map, sig_ancs = mto.filter_tree(mt, processed_image, params)
+
+#sig_ancs.tofile("sig_ancs.txt", "\n")
+#nodes = np.ctypeslib.as_array(mt.nodes, shape=image.shape) 
+#print(nodes[0:10])
+#print(sig_ancs[0:10])
+
 
 # Relabel objects for clearer visualisation
 id_map = mto.relabel_segments(id_map, shuffle_labels=False)

@@ -2,8 +2,12 @@
 
 import numpy as np
 import warnings
+import photutils
+import math
 from skimage.color import label2rgb
 from mtolib import moment_invariants
+from astropy.modeling import models, fitting
+from astropy.utils.exceptions import AstropyUserWarning
 
 
 def colour_labels(label_map):
@@ -109,11 +113,13 @@ def get_image_parameters(img, object_ids, sig_ancs, params,):
     return parameters
 
 """Calculate an object's data matrix given the indices of its pixels"""
-def node_to_data_matrix(img, node_id, pixel_indices):
+def node_to_data_matrix(img, pixel_indices):
     minX = np.min(pixel_indices[1])
     minY = np.min(pixel_indices[0])
     maxX = np.max(pixel_indices[1])
     maxY = np.max(pixel_indices[0])
+
+    #print(f'x: [{minX}, {maxX}], y: [{minY}, {maxY}]')
     s = (maxX - minX + 1, maxY - minY + 1)
     z = np.zeros(s)
     for i in range(0, pixel_indices[1].shape[0]):
@@ -123,6 +129,37 @@ def node_to_data_matrix(img, node_id, pixel_indices):
     return np.asmatrix(z)
 
 
+
+def get_object_node_invs(img, pixel_indices):
+    pixel_values = np.nan_to_num(img.data[pixel_indices])
+
+    # Subtract min values if required
+    pixel_values -= max(np.min(pixel_values), 0)
+
+    pixel_value_set = list(set(pixel_values))
+    pixel_value_set.sort(reverse=True)
+
+    max_value = pixel_value_set[0]
+    min_value = pixel_value_set[-1]
+
+    #print(min_value, max_value)
+
+    data_matrix = node_to_data_matrix(img, pixel_indices)
+    
+    # calculate the moment invariants on 4 different intensity levels
+    with np.errstate(divide='ignore',invalid='ignore'):
+        invts = moment_invariants.calculateInvariants(3, data_matrix)
+        #print( invts)
+        data_matrix[data_matrix < max_value * 0.65] = 0
+        invts = moment_invariants.calculateInvariants(3, data_matrix)
+        #print( invts)
+        data_matrix[data_matrix < max_value * 0.8] = 0
+        invts = moment_invariants.calculateInvariants(3, data_matrix)
+        #print( invts)
+        data_matrix[data_matrix < max_value * 0.95] = 0
+        invts = moment_invariants.calculateInvariants(3, data_matrix)
+
+
 def get_object_parameters(img, node_id, pixel_indices):
     """Calculate an object's parameters given the indices of its pixels"""
     p = [node_id]
@@ -130,18 +167,12 @@ def get_object_parameters(img, node_id, pixel_indices):
     # Get pixel values for an object
     pixel_values = np.nan_to_num(img.data[pixel_indices])
 
+    get_object_node_invs(img, pixel_indices)
+
     # Subtract min values if required
     pixel_values -= max(np.min(pixel_values), 0)
 
     flux_sum = np.sum(pixel_values)
-    data_matrix = node_to_data_matrix(img, node_id, pixel_indices)
-
-    # Subtract min values if required
-    min_value = max(np.min(data_matrix), 0)
-    data_matrix -= min_value
-    with np.errstate(divide='ignore',invalid='ignore'):
-        invts = moment_invariants.calculateInvariants(3, data_matrix)
-        print(node_id, invts)
 
     # Handle situations where flux_sum is 0 because of minimum subtraction
     if flux_sum == 0:
@@ -163,6 +194,9 @@ def get_object_parameters(img, node_id, pixel_indices):
     radii, half_max = get_light_distribution(pixel_values, flux_sum)
     p.append(half_max)
     p.extend(radii)
+
+    n = fit_1d_sersic_model(img, pixel_indices, f_o_m[0], f_o_m[1], radii[0])
+    print(f'sersic n={n}')
 
     return p
 
@@ -273,6 +307,7 @@ def get_light_distribution(pixel_values, flux_sum):
 
     # Convert the areas to approximate radii
     radii = find_radius(areas)
+    
 
     return radii, half_max_rad
 
@@ -280,3 +315,69 @@ def get_light_distribution(pixel_values, flux_sum):
 def find_radius(area):
     """Calculate the radius of a circle of a given radius"""
     return np.sqrt(area/np.pi)
+
+
+# try to fit a 1d sersic model
+# todo: uses the pixel center right now, use assymetry center or mean center?
+# returns n, the fitted sersic index
+def fit_1d_sersic_model(img, pixel_indices, center_x, center_y, r_eff):
+    annul_width = 1.0
+
+    ny, nx = img.shape
+    guess_n = 4.0
+    default_n = 2.0
+
+    num_fit_points = min(50, pixel_indices[1].size)
+
+    #print(f'center: ({center_x}, {center_y})')
+    
+
+    cx = 0.5 * (np.min(pixel_indices[1]) + np.max(pixel_indices[1]))
+    cy = 0.5 * (np.min(pixel_indices[0]) + np.max(pixel_indices[0]))
+    #print(cx, cy)
+
+    center_x, center_y = cx, cy
+
+    # calculate an array of radii (rads), and evaluate the intensity at each radius.
+    # this will be used in the model fitting
+    rads = np.empty(num_fit_points, dtype=np.float64)
+    fluxes = np.empty(num_fit_points, dtype=np.float64)
+    for i in  range(0, num_fit_points):
+        ix = pixel_indices[1][i]
+        iy = pixel_indices[0][i]
+        rads[i] = math.sqrt((ix - center_x)**2 + (iy - center_y)**2)
+        fluxes[i] = img[iy, ix]
+
+    # todo: check if r_in, r_out negative
+    r_in = r_eff - 0.5 * annul_width
+    r_out = r_eff + 0.5 * annul_width
+
+    if r_in < 0.0:
+        return default_n
+
+    annul = photutils.CircularAnnulus((center_x, center_y), r_in, r_out)
+
+   
+
+    # calculate initial value for Ie (amplitude)
+    mean_flux_annulus =  annul.do_photometry(img, method='exact')[0][0] / annul.area()
+
+    print(num_fit_points)
+
+    sersic_init = models.Sersic1D(amplitude=mean_flux_annulus, r_eff=r_eff, n=guess_n)
+    fit_sersic = fitting.LevMarLSQFitter()
+    with warnings.catch_warnings():
+        warnings.filterwarnings('error')
+        try:
+            sersic_model = fit_sersic(sersic_init, rads, fluxes, maxiter=512, acc=0.05)
+            #print(sersic_model.n, sersic_model.r_eff, sersic_model.amplitude)
+            return sersic_model.n.value
+        except Warning as e: 
+            #print('error fitting sersic model, info: ', fit_sersic.fit_info['message'])
+            return default_n
+    
+
+    #if fit_sersic.fit_info['ierr'] not in [1, 2, 3, 4]:
+    #    warnings.warn("fit_info['message']: " + fit_sersic.fit_info['message'], AstropyUserWarning)
+
+    

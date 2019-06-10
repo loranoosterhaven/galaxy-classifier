@@ -71,6 +71,7 @@ def filter_tree_timed(mt_in, image, params, sig_test=default_sig_test,
     sig_ancs = np.zeros(image.shape, dtype=ct.c_int32) -3
     sig_anc_pointer = sig_ancs.ctypes.data_as(object_id_type)
 
+
     # Get up/down tree functions if necessary
     if sig_nodes_function == up_tree:
         sig_nodes_function = up_tree()

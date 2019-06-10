@@ -1,2 +1,5 @@
 .DS_Store
 .idea/*
+mtolib/libs
+mtolib/__pycache__
+skyserver_fits/

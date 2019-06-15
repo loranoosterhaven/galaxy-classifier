@@ -78,7 +78,7 @@ def levelled_segments(img, label_map):
     return output
 
 
-def get_image_parameters(img, object_ids, sig_ancs, params,):
+def get_image_parameters(img, object_ids, sig_ancs, nodes, params,):
     """Calculate the parameters for all objects in an image"""
 
     # Treat warnings as exceptions
@@ -105,7 +105,7 @@ def get_image_parameters(img, object_ids, sig_ancs, params,):
     for n in range(len(id_set)):
 
         pixel_indices = np.unravel_index(sorted_ids[left_indices[n]:right_indices[n]], img.shape)
-        parameters.append(get_object_parameters(img, id_set[n], pixel_indices))
+        parameters.append(get_object_parameters(img, id_set[n], pixel_indices, sig_ancs, nodes))
 
     # Return to printing warnings
     warnings.resetwarnings()
@@ -160,12 +160,48 @@ def get_object_node_invs(img, pixel_indices):
         invts = moment_invariants.calculateInvariants(3, data_matrix)
 
 
-def get_object_parameters(img, node_id, pixel_indices):
+def get_object_parameters(img, node_id, pixel_indices, sig_ancs, nodes):
     """Calculate an object's parameters given the indices of its pixels"""
     p = [node_id]
 
     # Get pixel values for an object
     pixel_values = np.nan_to_num(img.data[pixel_indices])
+    pixel_sig_ancs = sig_ancs[pixel_indices]
+    pixel_nodes = nodes[pixel_indices]
+
+    print(f'gop {nodes[500][500]}')
+
+    pixel_indicesT = np.transpose(pixel_indices)
+
+    #k = pixel_sig_ancs[np.argmax(pixel_values)]
+    parent, area = pixel_nodes[np.argmax(pixel_values)]
+    k = parent
+
+    indices_ravelled = np.ravel_multi_index(pixel_indices, nodes.shape)
+
+    step_count = 0
+    area_sum = 0
+    inside_object = True
+
+    print(f'in {step_count}. i={np.max(pixel_values)} area={area}')
+
+    while k >= 0 and inside_object:
+        step_count += 1
+        next_i, next_j = np.unravel_index(k, nodes.shape)
+        #if (next_i in pixel_indices[0] and next_j in pixel_indices[1]):
+        parent, area = nodes[next_i, next_j]
+        if k in indices_ravelled:
+            intensity = img.data[next_i, next_j]
+            print(f'in {step_count}. i={intensity} area={area}')
+        else:
+            inside_object = False
+        
+        area_sum += area
+        k = parent
+
+    print(f'traversed {step_count} nodes. area_sum = {area_sum}. have {pixel_indicesT.shape[0]} pixels')
+    numDelta = pixel_values[pixel_values == np.max(pixel_values)].size
+    print(f'delta = {numDelta}')
 
     get_object_node_invs(img, pixel_indices)
 
@@ -361,8 +397,6 @@ def fit_1d_sersic_model(img, pixel_indices, center_x, center_y, r_eff):
 
     # calculate initial value for Ie (amplitude)
     mean_flux_annulus =  annul.do_photometry(img, method='exact')[0][0] / annul.area()
-
-    print(num_fit_points)
 
     sersic_init = models.Sersic1D(amplitude=mean_flux_annulus, r_eff=r_eff, n=guess_n)
     fit_sersic = fitting.LevMarLSQFitter()

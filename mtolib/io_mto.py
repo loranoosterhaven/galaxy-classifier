@@ -129,7 +129,7 @@ def generate_image(img, object_ids, p,
         print("Saved output to", p.out)
 
 
-def generate_parameters(img, object_ids, sig_ancs, p):
+def generate_parameters(img, object_ids, sig_ancs, nodes, p):
     """Write detected object parameters into a csv file"""
 
     if p.verbosity:
@@ -144,7 +144,7 @@ def generate_parameters(img, object_ids, sig_ancs, p):
     with open(p.par_out, 'w') as csvfile:
         param_writer = csv.writer(csvfile)
 
-        param_writer.writerows(postprocessing.get_image_parameters(img, object_ids, sig_ancs, p))
+        param_writer.writerows(postprocessing.get_image_parameters(img, object_ids, sig_ancs, nodes, p))
 
     if p.verbosity:
         print("Saved parameters to", p.par_out)

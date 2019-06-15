@@ -17,9 +17,8 @@ mt = mto.build_max_tree(processed_image, params)
 id_map, sig_ancs = mto.filter_tree(mt, processed_image, params)
 
 #sig_ancs.tofile("sig_ancs.txt", "\n")
-#nodes = np.ctypeslib.as_array(mt.nodes, shape=image.shape) 
-#print(nodes[0:10])
-#print(sig_ancs[0:10])
+nodes = np.ctypeslib.as_array(mt.nodes, shape=image.shape) 
+
 
 
 # Relabel objects for clearer visualisation
@@ -27,4 +26,4 @@ id_map = mto.relabel_segments(id_map, shuffle_labels=False)
 
 # Generate output files
 mto.generate_image(image, id_map, params)
-mto.generate_parameters(image, id_map, sig_ancs, params)
+mto.generate_parameters(image, id_map, sig_ancs, nodes, params)

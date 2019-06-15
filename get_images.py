@@ -46,7 +46,18 @@ with open("GalaxyZoo1_DR_table7.csv") as csv_file:
                 dataRelease='DR13')
 
 
-            Image.fromarray(np.flipud(img)).save(f"skyserver_fits/{row[0]}.png")
+            Image.fromarray(img).save(f"skyserver_fits/{row[0]}.png")
+
+            r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+
+            red = fits.PrimaryHDU(data=r)
+            red.writeto(f"skyserver_fits/{row[0]}r.fits")
+
+            green = fits.PrimaryHDU(data=g)
+            green.writeto(f"skyserver_fits/{row[0]}g.fits")
+
+            blue = fits.PrimaryHDU(data=b)
+            blue.writeto(f"skyserver_fits/{row[0]}b.fits")
 
             # Conversion to FITS file - unfortunately, it doesn't work correctly
             #print(img.shape[0])

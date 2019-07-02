@@ -6,9 +6,11 @@ import photutils
 import math
 from skimage.color import label2rgb
 from mtolib import moment_invariants
-from astropy.modeling import models, fitting
+from astropy.modeling import models, fitting, custom_model
 from astropy.utils.exceptions import AstropyUserWarning
-
+from astropy.modeling import Fittable1DModel, Parameter
+from scipy.special import binom
+import matplotlib.pyplot as plt
 
 def colour_labels(label_map):
     """Apply a colour to each object in the image non-sequentially and convert to 8-bit int RGB format"""
@@ -78,7 +80,7 @@ def levelled_segments(img, label_map):
     return output
 
 
-def get_image_parameters(img, object_ids, sig_ancs, nodes, params,):
+def get_image_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coords, params,):
     """Calculate the parameters for all objects in an image"""
 
     # Treat warnings as exceptions
@@ -105,7 +107,7 @@ def get_image_parameters(img, object_ids, sig_ancs, nodes, params,):
     for n in range(len(id_set)):
 
         pixel_indices = np.unravel_index(sorted_ids[left_indices[n]:right_indices[n]], img.shape)
-        parameters.append(get_object_parameters(img, id_set[n], pixel_indices, sig_ancs, nodes))
+        parameters.append(get_object_parameters(img, id_set[n], pixel_indices, sig_ancs, nodes, node_attribs, img_coords))
 
     # Return to printing warnings
     warnings.resetwarnings()
@@ -127,7 +129,6 @@ def node_to_data_matrix(img, pixel_indices):
         iy = pixel_indices[0][i]
         z[ix-minX][iy-minY] = img.data[iy, ix]
     return np.asmatrix(z)
-
 
 
 def get_object_node_invs(img, pixel_indices):
@@ -160,50 +161,259 @@ def get_object_node_invs(img, pixel_indices):
         invts = moment_invariants.calculateInvariants(3, data_matrix)
 
 
-def get_object_parameters(img, node_id, pixel_indices, sig_ancs, nodes):
+def get_pixel_coordinates(p, img_coords):
+    delta = p - img_coords.ref_pixel
+    coords = img_coords.ref_coords + np.dot(img_coords.ra_dec_per_pixel_matrix, delta)
+    return coords 
+
+def complex_moment(p, q, raw_moments):
+    c = 0 + 0j
+    for k in range(0, p+1):
+        for l in range(0, q+1):
+            c += binom(p,k)*binom(q,l)*((-1)**(q-l))*(1j**(p+q-k-l))*raw_moments[k+l, p+q-k-l]
+        
+    return c
+
+def central_moment(p, q, raw_moments):
+    c = 0
+
+    xbar = raw_moments[1,0] / raw_moments[0, 0]
+    ybar = raw_moments[0,1] / raw_moments[0, 0]
+
+    for m in range(0, p+1):
+        for n in range(0, q+1):
+            c += binom(p,m)*binom(q,n)*((-xbar)**(p-m))*(-ybar**(q-n))*raw_moments[m, n]
+        
+    return c
+
+def log_transform(x):
+    return np.sign(x) * np.log10(abs(x) + 1)    
+
+def flusser_invariants(raw_moments, area):
+    ''' calculate flusser's moment invariants. see:
+    http://homepages.inf.ed.ac.uk/rbf/CVonline/LOCAL_COPIES/FISHER/MOMINV/ 
+    '''
+    a2 = area*area
+    a25 = a2*np.sqrt(area)
+
+    # scale invariant moments
+    s11 = complex_moment(1, 1, raw_moments) / a2
+    s20 = complex_moment(2, 0, raw_moments) / a2
+    s21 = complex_moment(2, 1, raw_moments) / a25
+    s12 = complex_moment(1, 2, raw_moments) / a25
+    s30 = complex_moment(3, 0, raw_moments) / a25
+
+
+    #combined and rescaled (so the values are in a similar range) to get 6 rotation invariants
+    I1 = np.real(s11)
+
+    i2 = s21*s12
+    I2 = np.real(1000.0*s21*s12)
+
+    i34 = s20 * i2
+    I3 = np.real(i34)
+    I4 = np.imag(i34)
+
+    i56 = s30 * s12 * i2
+    I5 = np.real(i56)
+    I6 = np.imag(i56)
+
+    invs = np.array([I1, I2, I3, I4, I5, I6])
+
+    return invs
+
+def affine_moment_invariants(M, area):
+    u00 = central_moment(0, 0, M)
+    u11 = central_moment(1, 1, M)
+    u12 = central_moment(1, 2, M)
+    u02 = central_moment(0, 2, M)
+    u20 = central_moment(2, 0, M)
+    u21 = central_moment(2, 1, M)
+
+    u03 = central_moment(0, 3, M)
+    u30 = central_moment(3, 0, M)
+
+    I1 = (u20*u02 - u11*u11) / np.power(u00, 4.0)
+    I2 = (-u30*u30*u03*u03 - 6.0*u30*u21*u12*u03 -
+            - 4.0*u30*u12*u12*u12 - 4.0*u21*u21*u03
+            + 3*u21*u21*u12*u12) / np.power(u00, 10.0)
+    I3 = (u20*u02 - u11*u11) / np.power(u00, 7.0)
+
+    return np.array([I1, I2, I3])
+
+def normalized_AMIs(M, area):
+    c11 = complex_moment(1,1,M)
+    c21c12 = complex_moment(2,1,M) * complex_moment(1,2,M)
+    c30 = complex_moment(3,0,M)
+    c03 = complex_moment(0,3,M)
+    c12 = complex_moment(1,2,M)
+
+    a = np.array([c11, c21c12, c30*c03, np.real(c30*c12*c12*c12)])
+    
+    return np.abs(a)
+
+
+class SersicCurve1D(Fittable1DModel):
+    logI0 = Parameter()
+    k = Parameter()
+    n = Parameter()
+
+    @staticmethod
+    def evaluate(x, logI0, k, n):
+        return logI0 - k*x**(1.0/n)
+
+    @staticmethod
+    def fit_deriv(x, logI0, k, n):
+        d_logI0 = np.ones_like(x)
+        d_k = -x**(1.0/n)
+        d_n = -(k * x**(1.0/n) * np.log(x)) / (n*n)
+        return [d_logI0, d_k, d_n]
+
+
+def fit_sersic_model_to_invariant(x, y):
+    guess_logI0 = y[0] + 0.5
+    guess_n = 4.0
+    guess_k = 0
+
+    #print(y)
+
+    print(len(y))
+
+    # Fit model to data
+    m_init = SersicCurve1D(logI0 = guess_logI0, k = guess_k, n = guess_n)
+    print(m_init)
+    fit = fitting.LevMarLSQFitter()
+    m = fit(m_init, x, y, acc=1e12)
+    print(f'{m}')
+    return m
+
+def get_object_parameters(img, node_id, pixel_indices, sig_ancs, nodes, node_attribs, img_coords):
     """Calculate an object's parameters given the indices of its pixels"""
     p = [node_id]
 
+    parents = nodes['parent']
+    areas = nodes['area']
+
     # Get pixel values for an object
     pixel_values = np.nan_to_num(img.data[pixel_indices])
-    pixel_sig_ancs = sig_ancs[pixel_indices]
     pixel_nodes = nodes[pixel_indices]
 
-    print(f'gop {nodes[500][500]}')
+    # get central peak coordinates
+    peak_index = np.argmax(pixel_values)
+    a0, a1 = pixel_indices[0][peak_index], pixel_indices[1][peak_index]
+    current_node_idx, area = nodes[a0, a1]
 
-    pixel_indicesT = np.transpose(pixel_indices)
+    # calculate ra,dec coordinates of central peak
+    peak_coords = get_pixel_coordinates(np.array([a0, a1]), img_coords)
+    print(f'******************************')
+    print(f'object {node_id}: ra = {peak_coords[0]}, dec = {peak_coords[1]}')
 
-    #k = pixel_sig_ancs[np.argmax(pixel_values)]
-    parent, area = pixel_nodes[np.argmax(pixel_values)]
-    k = parent
+    # areas and parents for this object
+    pixel_parents = parents[pixel_indices]
+    pixel_areas = areas[pixel_indices]
+    pixel_radii = np.sqrt(pixel_areas)
+    raw_moments = node_attribs[pixel_indices]['moments']
 
-    indices_ravelled = np.ravel_multi_index(pixel_indices, nodes.shape)
+    ind = np.unravel_index(np.argsort(pixel_radii, axis=None), pixel_radii.shape)[0]
+    ind = ind[0:1000]
 
-    step_count = 0
-    area_sum = 0
-    inside_object = True
+    moment_invs = np.empty((len(ind), 4))
 
-    print(f'in {step_count}. i={np.max(pixel_values)} area={area}')
+    for i in range(0, len(moment_invs)):
+        pixel_idx = ind[i]
+        rm = np.reshape(raw_moments[pixel_idx], (4,4))
+        moment_invs[i] = normalized_AMIs(rm, float(pixel_areas[pixel_idx]))
 
-    while k >= 0 and inside_object:
-        step_count += 1
-        next_i, next_j = np.unravel_index(k, nodes.shape)
-        #if (next_i in pixel_indices[0] and next_j in pixel_indices[1]):
-        parent, area = nodes[next_i, next_j]
-        if k in indices_ravelled:
-            intensity = img.data[next_i, next_j]
-            print(f'in {step_count}. i={intensity} area={area}')
-        else:
-            inside_object = False
+    # create plots
+    R = pixel_radii[ind]
+    plt.subplot(6,1,1)
+    plt.plot(R, moment_invs[:, 0], '-r')
+    plt.subplot(6,1,2)
+    plt.plot(R, moment_invs[:, 1], '-g')
+    plt.subplot(6,1,3)
+    plt.plot(R, moment_invs[:, 2], '-b')
+    plt.subplot(6,1,4)
+    plt.plot(R, moment_invs[:, 3], '-c')
+    # plt.subplot(6,1,5)
+    # plt.plot(R, moment_invs[:, 4], '-m')
+    # plt.subplot(6,1,6)
+    # plt.plot(R, moment_invs[:, 5], '-y')
+    plt.savefig(f'plots/{node_id}')
+    plt.clf()
+
+    # log transformed plots
+    moment_invs = log_transform(moment_invs)
+    R = np.log(R)
+    #sm1 = fit_sersic_model_to_invariant(R, moment_invs[:, 0])
+    plt.subplot(6,1,1)
+    #plt.plot(R, sm1(R))
+    plt.plot(R, moment_invs[:, 0], '-r')
+    plt.subplot(6,1,2)
+    plt.plot(R, moment_invs[:, 1], '-g')
+    plt.subplot(6,1,3)
+    plt.plot(R, moment_invs[:, 2], '-b')
+    plt.subplot(6,1,4)
+    plt.plot(R, moment_invs[:, 3], '-c')
+    # plt.subplot(6,1,5)
+    # plt.plot(R, moment_invs[:, 4], '-m')
+    # plt.subplot(6,1,6)
+    # plt.plot(R, moment_invs[:, 5], '-y')
+    plt.savefig(f'plots/{node_id}_log_transformed')
+    plt.clf()
+
+
+    # indices_ravelled = np.ravel_multi_index(pixel_indices, nodes.shape)
+
+    # step_count = 1
+    # inside_object = True
+    # spans = 1
+
+    # node_power = node_attribs[a0, a1]['power']
+    # node_intensity = pixel_values[peak_index]
+    # print(f'in {step_count}. i={pixel_values[peak_index]} area={area}. power = {node_power}')
+
+    # traversed_nodes_pixels = []
+
+
+    # while current_node_idx >= 0 and inside_object:
+    #     prev_power = node_power
+    #     prev_intensity = node_intensity
+    #     next_i, next_j = np.unravel_index(current_node_idx, nodes.shape)
+    #     next_node_idx, area = nodes[next_i, next_j]
+
+    #     if current_node_idx in indices_ravelled:
+    #         step_count += 1
+    #         pixels_in_node = pixel_parents[pixel_parents == next_node_idx]
+    #         areas_in_node = pixel_areas[pixel_parents == next_node_idx]
+
+    #         #all_pixels_in_node = parents[parents == next_node_idx]
+    #         #all_areas_in_node = areas[parents == next_node_idx]
+
+    #         detection_level = node_attribs[next_i, next_j]['detection_level']
+
+    #         moments = np.reshape(node_attribs[next_i, next_j]['moments'], (4,4))
+    #         invs = flusser_invariants(moments, float(area))
+    #         #print(log_transform(invs))
+
+    #         node_intensity = img.data[next_i, next_j]
+    #         delta_intensity = (prev_intensity - node_intensity) / area
+
+    #         traversed_nodes_pixels.extend(pixels_in_node.tolist())
+    #         s = pixels_in_node.size
+    #         print(f'in {step_count}. dl = {detection_level}. area={area}, \
+    #         {areas_in_node}')
+    #         spans += s
+    #     else:
+    #         inside_object = False
         
-        area_sum += area
-        k = parent
+    #     current_node_idx = next_node_idx
 
-    print(f'traversed {step_count} nodes. area_sum = {area_sum}. have {pixel_indicesT.shape[0]} pixels')
-    numDelta = pixel_values[pixel_values == np.max(pixel_values)].size
-    print(f'delta = {numDelta}')
+    # print(f'traversed {step_count} nodes. spans = {spans}. have {pixel_values.size} pixels')
+    # numDelta = pixel_values[pixel_values == np.max(pixel_values)].size
+    # print(f'delta = {numDelta}')
+    # print(f'range={np.max(pixel_values) - np.min(pixel_values)}')
 
-    get_object_node_invs(img, pixel_indices)
+    #get_object_node_invs(img, pixel_indices)
 
     # Subtract min values if required
     pixel_values -= max(np.min(pixel_values), 0)
@@ -230,9 +440,6 @@ def get_object_parameters(img, node_id, pixel_indices, sig_ancs, nodes):
     radii, half_max = get_light_distribution(pixel_values, flux_sum)
     p.append(half_max)
     p.extend(radii)
-
-    n = fit_1d_sersic_model(img, pixel_indices, f_o_m[0], f_o_m[1], radii[0])
-    print(f'sersic n={n}')
 
     return p
 
@@ -344,74 +551,9 @@ def get_light_distribution(pixel_values, flux_sum):
     # Convert the areas to approximate radii
     radii = find_radius(areas)
     
-
     return radii, half_max_rad
 
 
 def find_radius(area):
     """Calculate the radius of a circle of a given radius"""
     return np.sqrt(area/np.pi)
-
-
-# try to fit a 1d sersic model
-# todo: uses the pixel center right now, use assymetry center or mean center?
-# returns n, the fitted sersic index
-def fit_1d_sersic_model(img, pixel_indices, center_x, center_y, r_eff):
-    annul_width = 1.0
-
-    ny, nx = img.shape
-    guess_n = 4.0
-    default_n = 2.0
-
-    num_fit_points = min(50, pixel_indices[1].size)
-
-    #print(f'center: ({center_x}, {center_y})')
-    
-
-    cx = 0.5 * (np.min(pixel_indices[1]) + np.max(pixel_indices[1]))
-    cy = 0.5 * (np.min(pixel_indices[0]) + np.max(pixel_indices[0]))
-    #print(cx, cy)
-
-    center_x, center_y = cx, cy
-
-    # calculate an array of radii (rads), and evaluate the intensity at each radius.
-    # this will be used in the model fitting
-    rads = np.empty(num_fit_points, dtype=np.float64)
-    fluxes = np.empty(num_fit_points, dtype=np.float64)
-    for i in  range(0, num_fit_points):
-        ix = pixel_indices[1][i]
-        iy = pixel_indices[0][i]
-        rads[i] = math.sqrt((ix - center_x)**2 + (iy - center_y)**2)
-        fluxes[i] = img[iy, ix]
-
-    # todo: check if r_in, r_out negative
-    r_in = r_eff - 0.5 * annul_width
-    r_out = r_eff + 0.5 * annul_width
-
-    if r_in < 0.0:
-        return default_n
-
-    annul = photutils.CircularAnnulus((center_x, center_y), r_in, r_out)
-
-   
-
-    # calculate initial value for Ie (amplitude)
-    mean_flux_annulus =  annul.do_photometry(img, method='exact')[0][0] / annul.area()
-
-    sersic_init = models.Sersic1D(amplitude=mean_flux_annulus, r_eff=r_eff, n=guess_n)
-    fit_sersic = fitting.LevMarLSQFitter()
-    with warnings.catch_warnings():
-        warnings.filterwarnings('error')
-        try:
-            sersic_model = fit_sersic(sersic_init, rads, fluxes, maxiter=512, acc=0.05)
-            #print(sersic_model.n, sersic_model.r_eff, sersic_model.amplitude)
-            return sersic_model.n.value
-        except Warning as e: 
-            #print('error fitting sersic model, info: ', fit_sersic.fit_info['message'])
-            return default_n
-    
-
-    #if fit_sersic.fit_info['ierr'] not in [1, 2, 3, 4]:
-    #    warnings.warn("fit_info['message']: " + fit_sersic.fit_info['message'], AstropyUserWarning)
-
-    

@@ -6,7 +6,7 @@ from mtolib import _ctype_classes as ct
 from mtolib.preprocessing import preprocess_image
 from mtolib import maxtree
 from mtolib.tree_filtering import filter_tree, get_c_significant_nodes, init_double_filtering
-from mtolib.io_mto import generate_image, generate_parameters, read_fits_file, make_parser
+from mtolib.io_mto import generate_image, generate_parameters, read_fits_file, get_fits_header, get_sdss_fits_header_coordinates, make_parser
 from mtolib.utils import time_function
 from ctypes import c_float, c_double
 from mtolib.postprocessing import relabel_segments
@@ -24,6 +24,11 @@ def setup():
 
     img = read_fits_file(p.filename)
 
+    # assume that we are always working with an SDSS file for now
+    # meaning we can always obtain the coordinates from the FITS header
+    header = get_fits_header(p.filename)
+    coords = get_sdss_fits_header_coordinates(header)
+
     if p.verbosity:
         print("\n---Image dimensions---")
         print("Height = ", img.shape[0])
@@ -39,7 +44,7 @@ def setup():
     # Initialise CTypes classes
     ct.init_classes(p.d_type)
 
-    return img, p
+    return img, p, coords
 
 
 def max_tree_timed(img, params, maxtree_class):

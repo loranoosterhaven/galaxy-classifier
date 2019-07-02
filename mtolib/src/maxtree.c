@@ -1,9 +1,12 @@
 #include "maxtree.h"
 
 #include <assert.h>
+#include <math.h>
 
 #define MT_INDEX_OF(PIXEL) ((PIXEL).location.y * mt->img.width + \
   (PIXEL).location.x)
+
+#define MIN(a,b) (((a)<(b))?(a):(b))
 
 const int mt_conn_12[MT_CONN_12_HEIGHT * MT_CONN_12_WIDTH] =
 {
@@ -54,7 +57,6 @@ mt_pixel mt_starting_pixel(mt_data* mt)
         pixel.value = mt->img.data[index];
         pixel.location.x = x;
         pixel.location.y = y;
-
       }
     }
   }
@@ -68,10 +70,23 @@ static void mt_init_nodes(mt_data* mt)
   INT_TYPE i;
 
   // Set all parents as unassigned, and all areas as 1
+  // init moments
   for (i = 0; i != mt->img.size; ++i)
   {
     mt->nodes[i].parent = MT_UNASSIGNED;
     mt->nodes[i].area = 1;
+
+    FLOAT_TYPE y = i / mt->img.width;
+    FLOAT_TYPE x = i % mt->img.width;
+    for (SHORT_TYPE p = 0; p <= MOMENTS_ORDER; p++) 
+    {
+      for (SHORT_TYPE q = 0; q <= MOMENTS_ORDER; q++) 
+      {
+          INT_TYPE moment_index = p * (MOMENTS_ORDER + 1) + q;
+          mt->nodes_attributes[i].moments[moment_index] =
+            pow(x,p)*pow(y,q) /* * mt->img.data[i]; */;
+      }
+    }
   }
 }
 
@@ -187,6 +202,15 @@ static void mt_merge_nodes(mt_data* mt,
 
   merge_from_attr->volume += delta * merge_from->area;
   merge_to_attr->volume += merge_from_attr->volume;
+
+  // same as MIN(mt->img.data[merge_from_idx], mt->img.data[merge_to_idx])
+  merge_from_attr->detection_level = mt->img.data[merge_to_idx]; 
+  merge_to_attr->detection_level = merge_from_attr->detection_level;
+
+  // moments
+  for (SHORT_TYPE i = 0; i < (MOMENTS_ORDER-1)*(MOMENTS_ORDER-1); i++) {
+    merge_to_attr->moments[i] += merge_from_attr->moments[i];
+  }
 }
 
 static void mt_descend(mt_data* mt, mt_pixel *next_pixel)

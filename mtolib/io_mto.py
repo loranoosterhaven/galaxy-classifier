@@ -10,6 +10,12 @@ import csv
 import warnings
 from astropy.utils.exceptions import AstropyDeprecationWarning
 
+class FitsHeaderCoordinates():
+    def __init__(self, dimensions, ref_pixel, ref_coords, ra_dec_per_pixel_matrix):
+        self.dimensions = dimensions
+        self.ref_pixel = ref_pixel
+        self.ref_coords = ref_coords
+        self.ra_dec_per_pixel_matrix = ra_dec_per_pixel_matrix
 
 def get_file_extension(filename):
     """Get the extension part of a given filename."""
@@ -129,7 +135,7 @@ def generate_image(img, object_ids, p,
         print("Saved output to", p.out)
 
 
-def generate_parameters(img, object_ids, sig_ancs, nodes, p):
+def generate_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coords, p):
     """Write detected object parameters into a csv file"""
 
     if p.verbosity:
@@ -144,7 +150,7 @@ def generate_parameters(img, object_ids, sig_ancs, nodes, p):
     with open(p.par_out, 'w') as csvfile:
         param_writer = csv.writer(csvfile)
 
-        param_writer.writerows(postprocessing.get_image_parameters(img, object_ids, sig_ancs, nodes, p))
+        param_writer.writerows(postprocessing.get_image_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coords, p))
 
     if p.verbosity:
         print("Saved parameters to", p.par_out)
@@ -169,3 +175,14 @@ def make_parser():
     parser.add_argument('-verbosity', type=int, help='Verbosity level (0-2)', choices=range(0, 3), default=0)
 
     return parser
+
+def get_sdss_fits_header_coordinates(header):
+    """ Get the coordinate information from a .fits file header """
+    dimensions = (header['NAXIS1'], header['NAXIS2'])
+    ref_pixel = np.array([header['CRPIX1'], header['CRPIX2']])
+    ref_coords = np.array([header['CRVAL1'], header['CRVAL2']])
+    ra_dec_per_pixel_matrix = np.array([
+        [header['CD1_1'], header['CD1_2']], 
+        [header['CD2_1'], header['CD2_2']]
+    ])
+    return FitsHeaderCoordinates(dimensions, ref_pixel, ref_coords, ra_dec_per_pixel_matrix)

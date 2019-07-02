@@ -3,3 +3,5 @@
 mtolib/libs
 mtolib/__pycache__
 skyserver_fits/
+plots/*
+mtolib/lib/*

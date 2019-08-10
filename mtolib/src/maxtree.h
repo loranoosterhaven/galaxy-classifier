@@ -37,7 +37,7 @@ typedef struct
 {
   FLOAT_TYPE volume;
   FLOAT_TYPE power;
-  FLOAT_TYPE detection_level;
+  FLOAT_TYPE brightness;
   double moments[(MOMENTS_ORDER+1)*(MOMENTS_ORDER+1)];
 } mt_node_attributes;
 

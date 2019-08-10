@@ -28,7 +28,7 @@ def init_classes(d_type):
 
     MtNodeAttributes._fields_ = [("volume", float_type),
                     ("power", float_type),
-                    ("detection_level", float_type),
+                    ("brightness", float_type),
                     ("moments", ct.c_double*16)]
 
     MtNode._fields_ = [("parent", ct.c_int32),

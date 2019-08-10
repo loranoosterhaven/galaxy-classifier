@@ -9,6 +9,8 @@ from PIL import Image
 import csv
 import warnings
 from astropy.utils.exceptions import AstropyDeprecationWarning
+from astropy import units as u
+from astropy.coordinates import SkyCoord
 
 class FitsHeaderCoordinates():
     def __init__(self, dimensions, ref_pixel, ref_coords, ra_dec_per_pixel_matrix):
@@ -135,7 +137,7 @@ def generate_image(img, object_ids, p,
         print("Saved output to", p.out)
 
 
-def generate_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coords, p):
+def generate_parameters(img, gz_cat, object_ids, nodes, node_attribs, img_coords, p):
     """Write detected object parameters into a csv file"""
 
     if p.verbosity:
@@ -150,7 +152,7 @@ def generate_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coor
     with open(p.par_out, 'w') as csvfile:
         param_writer = csv.writer(csvfile)
 
-        param_writer.writerows(postprocessing.get_image_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coords, p))
+        param_writer.writerows(postprocessing.get_image_parameters(img, gz_cat, object_ids, nodes, node_attribs, img_coords, p))
 
     if p.verbosity:
         print("Saved parameters to", p.par_out)
@@ -163,6 +165,8 @@ def make_parser():
     parser.add_argument('filename', type=str, help='Location of input .fits file')
     parser.add_argument('-out', type=str, help='Location to save filtered image. '
                                                'Supports .fits and .png filenames', default='out.png')
+    parser.add_argument('-gz_filename', type=str, help = 'Location of galaxy zoo catalogue .csv file', default='')
+    parser.add_argument('-plot_dir', type=str, help = 'Directory to save plots in', default=None)
     parser.add_argument('-par_out', type=str, help='Location to save output parameters (csv format).', default='parameters.csv')
     parser.add_argument('-soft_bias', type=float, help='Constant to subtract', default=None)
     parser.add_argument('-gain', type=float, help='Gain in electrons per ADU', default=-1)
@@ -186,3 +190,14 @@ def get_sdss_fits_header_coordinates(header):
         [header['CD2_1'], header['CD2_2']]
     ])
     return FitsHeaderCoordinates(dimensions, ref_pixel, ref_coords, ra_dec_per_pixel_matrix)
+
+def read_gz_catalogue(filename):
+    """ read a galaxy zoo .csv file. The returned value is a tuple(cat, label) 
+        being the sky catalogue and the respective labels"""
+    if filename == '':
+        return None
+    else:
+        gz_data = np.genfromtxt(filename, delimiter=',', skip_header=1, usecols=(4,5,9),
+            dtype=[('ra','float'),('dec','float'), ('class','S7')])
+        catalogue = SkyCoord(ra=gz_data['ra']*u.deg, dec=gz_data['dec']*u.deg)
+        return (catalogue, gz_data['class'])

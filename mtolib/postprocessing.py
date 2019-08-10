@@ -2,15 +2,22 @@
 
 import numpy as np
 import warnings
-import photutils
-import math
 from skimage.color import label2rgb
-from mtolib import moment_invariants
+from astropy.nddata import Cutout2D
 from astropy.modeling import models, fitting, custom_model
 from astropy.utils.exceptions import AstropyUserWarning
 from astropy.modeling import Fittable1DModel, Parameter
 from scipy.special import binom
 import matplotlib.pyplot as plt
+from scipy.spatial import ConvexHull, convex_hull_plot_2d
+import matplotlib.colors as colors
+from astropy.coordinates import SkyCoord
+from astropy import units as u
+import os
+from astropy.modeling.models import Sersic1D
+
+
+FTS_NUM_POINTS = 10
 
 def colour_labels(label_map):
     """Apply a colour to each object in the image non-sequentially and convert to 8-bit int RGB format"""
@@ -79,16 +86,28 @@ def levelled_segments(img, label_map):
 
     return output
 
+def make_headings(prefix, n):
+    ''' make headings of the form prefix0, prefix x / (n-1)... prefix1'''
+    return list(map(lambda x : f'{prefix}{round(x/(n-1), 2)}', range(0,n)))
 
-def get_image_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coords, params,):
+
+def get_image_parameters(img, gz_cat, object_ids, nodes, node_attribs, img_coords, params,):
     """Calculate the parameters for all objects in an image"""
 
     # Treat warnings as exceptions
     warnings.filterwarnings('error', category=RuntimeWarning, append=True)
 
     parameters = []
-    headings = ['ID', 'X', 'Y', 'A', 'B', 'theta',  # 'kurtosis',
-                           'total_flux', 'mu_max', 'mu_median', 'mu_mean', 'R_fwhm', 'R_e', 'R10', 'R90']
+    headings = ['ID', 'Area', 'gz2_label', 'ra', 'dec']
+
+    headings.extend(['ea', 'fy0', 'fa', 'gy0', 'ga', 'eb', 'fb', 'gb'])
+    headings.extend(make_headings('circ_', FTS_NUM_POINTS))
+    headings.extend(make_headings('circ_log_', FTS_NUM_POINTS))
+    headings.extend(make_headings('conv_', FTS_NUM_POINTS))
+
+    for i in range(1, 5):
+        headings.extend(make_headings(f'ami_{i}_', FTS_NUM_POINTS))
+        headings.extend(make_headings(f'ami_log_{i}_', FTS_NUM_POINTS))
 
     parameters.append(headings)
 
@@ -107,59 +126,15 @@ def get_image_parameters(img, object_ids, sig_ancs, nodes, node_attribs, img_coo
     for n in range(len(id_set)):
 
         pixel_indices = np.unravel_index(sorted_ids[left_indices[n]:right_indices[n]], img.shape)
-        parameters.append(get_object_parameters(img, id_set[n], pixel_indices, sig_ancs, nodes, node_attribs, img_coords))
+
+        object_params = get_object_parameters(img, gz_cat, params.plot_dir, id_set[n], pixel_indices, nodes, node_attribs, img_coords)
+        if object_params != None:
+            parameters.append(object_params)
 
     # Return to printing warnings
     warnings.resetwarnings()
 
     return parameters
-
-"""Calculate an object's data matrix given the indices of its pixels"""
-def node_to_data_matrix(img, pixel_indices):
-    minX = np.min(pixel_indices[1])
-    minY = np.min(pixel_indices[0])
-    maxX = np.max(pixel_indices[1])
-    maxY = np.max(pixel_indices[0])
-
-    #print(f'x: [{minX}, {maxX}], y: [{minY}, {maxY}]')
-    s = (maxX - minX + 1, maxY - minY + 1)
-    z = np.zeros(s)
-    for i in range(0, pixel_indices[1].shape[0]):
-        ix = pixel_indices[1][i]
-        iy = pixel_indices[0][i]
-        z[ix-minX][iy-minY] = img.data[iy, ix]
-    return np.asmatrix(z)
-
-
-def get_object_node_invs(img, pixel_indices):
-    pixel_values = np.nan_to_num(img.data[pixel_indices])
-
-    # Subtract min values if required
-    pixel_values -= max(np.min(pixel_values), 0)
-
-    pixel_value_set = list(set(pixel_values))
-    pixel_value_set.sort(reverse=True)
-
-    max_value = pixel_value_set[0]
-    min_value = pixel_value_set[-1]
-
-    #print(min_value, max_value)
-
-    data_matrix = node_to_data_matrix(img, pixel_indices)
-    
-    # calculate the moment invariants on 4 different intensity levels
-    with np.errstate(divide='ignore',invalid='ignore'):
-        invts = moment_invariants.calculateInvariants(3, data_matrix)
-        #print( invts)
-        data_matrix[data_matrix < max_value * 0.65] = 0
-        invts = moment_invariants.calculateInvariants(3, data_matrix)
-        #print( invts)
-        data_matrix[data_matrix < max_value * 0.8] = 0
-        invts = moment_invariants.calculateInvariants(3, data_matrix)
-        #print( invts)
-        data_matrix[data_matrix < max_value * 0.95] = 0
-        invts = moment_invariants.calculateInvariants(3, data_matrix)
-
 
 def get_pixel_coordinates(p, img_coords):
     delta = p - img_coords.ref_pixel
@@ -167,127 +142,194 @@ def get_pixel_coordinates(p, img_coords):
     return coords 
 
 def complex_moment(p, q, raw_moments):
-    c = 0 + 0j
+    c = 0+0j
     for k in range(0, p+1):
         for l in range(0, q+1):
             c += binom(p,k)*binom(q,l)*((-1)**(q-l))*(1j**(p+q-k-l))*raw_moments[k+l, p+q-k-l]
-        
     return c
 
-def central_moment(p, q, raw_moments):
+def central_moment(p, q, M):
     c = 0
-
-    xbar = raw_moments[1,0] / raw_moments[0, 0]
-    ybar = raw_moments[0,1] / raw_moments[0, 0]
+    #print(M)
+    xc = M[1,0] / M[0, 0]
+    yc = M[0,1] / M[0, 0]
 
     for m in range(0, p+1):
         for n in range(0, q+1):
-            c += binom(p,m)*binom(q,n)*((-xbar)**(p-m))*(-ybar**(q-n))*raw_moments[m, n]
+            #c += binom(p,m)*binom(q,n)*((-xc)**(p-m))*(-yc**(q-n))*M[m, n]
+            c += binom(p,m)*binom(q,n)*((-1)**(m+n))*(xc**m)*(yc**n)*M[p-m,q-n]
         
     return c
 
+
+def central_moments(M):
+    nm = np.empty(shape=M.shape)
+    for p in range(nm.shape[0]):
+        for q in range(nm.shape[1]):
+            nm[p][q] = central_moment(p,q,M)
+    return nm
+
+# U = central moments
+def normalized_moment(p, q, U):
+    omega = (p + q + 2) / 2
+    return U[p, q] / (U[0,0] ** omega)
+
+def normalized_moments(M):
+    if (M[0][0] == 0):
+        return M
+
+    U = central_moments(M)
+    v = np.empty(shape=M.shape)
+    for p in range(U.shape[0]):
+        for q in range(U.shape[1]):
+            v[p][q] = normalized_moment(p,q,U)
+    
+    return v
+
+
 def log_transform(x):
-    return np.sign(x) * np.log10(abs(x) + 1)    
+    return np.sign(x) * np.log10(abs(x) + 1)
 
 def flusser_invariants(raw_moments, area):
     ''' calculate flusser's moment invariants. see:
     http://homepages.inf.ed.ac.uk/rbf/CVonline/LOCAL_COPIES/FISHER/MOMINV/ 
     '''
-    a2 = area*area
-    a25 = a2*np.sqrt(area)
 
-    # scale invariant moments
-    s11 = complex_moment(1, 1, raw_moments) / a2
-    s20 = complex_moment(2, 0, raw_moments) / a2
-    s21 = complex_moment(2, 1, raw_moments) / a25
-    s12 = complex_moment(1, 2, raw_moments) / a25
-    s30 = complex_moment(3, 0, raw_moments) / a25
+    # transform raw moments to normalized (Translation and scale invariant) v_pq
+    V = normalized_moments(raw_moments)
 
+    c11 = complex_moment(1, 1, V)
+    c20 = complex_moment(2, 0, V)
+    c21 = complex_moment(2, 1, V)
+    c12 = complex_moment(1, 2, V)
+    c30 = complex_moment(3, 0, V)
 
-    #combined and rescaled (so the values are in a similar range) to get 6 rotation invariants
-    I1 = np.real(s11)
+    # rotation invariant moments
+    f_1_1 = c11
+    f_2_1 = c21*c12
+    f_2_0 = c20*c12*c12
+    f_3_0 = c30*c12*c12*c12
 
-    i2 = s21*s12
-    I2 = np.real(1000.0*s21*s12)
-
-    i34 = s20 * i2
-    I3 = np.real(i34)
-    I4 = np.imag(i34)
-
-    i56 = s30 * s12 * i2
-    I5 = np.real(i56)
-    I6 = np.imag(i56)
-
-    invs = np.array([I1, I2, I3, I4, I5, I6])
-
+    invs = np.array([f_1_1.real, f_2_1.real, f_2_0.real, f_2_0.imag, f_3_0.real, f_3_0.imag])
+    #print(invs)
     return invs
 
-def affine_moment_invariants(M, area):
-    u00 = central_moment(0, 0, M)
-    u11 = central_moment(1, 1, M)
-    u12 = central_moment(1, 2, M)
-    u02 = central_moment(0, 2, M)
-    u20 = central_moment(2, 0, M)
-    u21 = central_moment(2, 1, M)
+def normalized_AMIs(M):
+    V = normalized_moments(M)
+    c11 = complex_moment(1,1,V)
+    c21c12 = complex_moment(2,1,V) * complex_moment(1,2,V)
+    c30 = complex_moment(3,0,V)
+    c03 = complex_moment(0,3,V)
+    c12 = complex_moment(1,2,V)
 
-    u03 = central_moment(0, 3, M)
-    u30 = central_moment(3, 0, M)
-
-    I1 = (u20*u02 - u11*u11) / np.power(u00, 4.0)
-    I2 = (-u30*u30*u03*u03 - 6.0*u30*u21*u12*u03 -
-            - 4.0*u30*u12*u12*u12 - 4.0*u21*u21*u03
-            + 3*u21*u21*u12*u12) / np.power(u00, 10.0)
-    I3 = (u20*u02 - u11*u11) / np.power(u00, 7.0)
-
-    return np.array([I1, I2, I3])
-
-def normalized_AMIs(M, area):
-    c11 = complex_moment(1,1,M)
-    c21c12 = complex_moment(2,1,M) * complex_moment(1,2,M)
-    c30 = complex_moment(3,0,M)
-    c03 = complex_moment(0,3,M)
-    c12 = complex_moment(1,2,M)
-
-    a = np.array([c11, c21c12, c30*c03, np.real(c30*c12*c12*c12)])
+    a = np.array([
+        50*c11, 
+        10000*c21c12, 
+        5000*c30*c03, 
+        100000000*c30*c12*c12*c12
+    ])
     
     return np.abs(a)
 
+def hu_invariants(M):
+    v = normalized_moments(M)
+    I1 = v[2,0] + v[0,2]
 
-class SersicCurve1D(Fittable1DModel):
-    logI0 = Parameter()
-    k = Parameter()
-    n = Parameter()
+    i21 = v[2,0] - v[0,2]
+    I2 = i21*i21 + 4*v[1,1]
 
-    @staticmethod
-    def evaluate(x, logI0, k, n):
-        return logI0 - k*x**(1.0/n)
+    i31 = v[3,0] - 3*v[1,2]
+    i32 = 3*v[2,1]-v[0,3]
+    I3 = i31*i31 + i32*i32
 
-    @staticmethod
-    def fit_deriv(x, logI0, k, n):
-        d_logI0 = np.ones_like(x)
-        d_k = -x**(1.0/n)
-        d_n = -(k * x**(1.0/n) * np.log(x)) / (n*n)
-        return [d_logI0, d_k, d_n]
+    i41 = v[3,0]+v[1,2]
+    i42 = v[2,1]+v[0,3]
+    I4 = i41*i41 + i42*i42
 
+    return np.array([I1,I2,I3,I4])
 
-def fit_sersic_model_to_invariant(x, y):
-    guess_logI0 = y[0] + 0.5
-    guess_n = 4.0
-    guess_k = 0
+def normalized_AMIs2(M):
+    ''' http://optics.sgu.ru/~ulianov/Bazarova/LASCA_literature/AffineMomentsInvariants.pdf '''
+    u = central_moments(M)
+    I1 = (u[2,0]*u[0,2]-u[1,1]*u[1,1])/np.power(u[0,0],4)
+    I2 = (u[3,0]*u[3,0]*u[0,3]*u[0,3] - 6*u[3,0]*u[2,1]*u[1,2]*u[0,3] +
+        4*u[3,0]*u[1,2]*u[1,2]*u[1,2] + 4*u[0,3]*u[2,1]*u[2,1]*u[2,1] - 
+        3*u[2,1]*u[2,1]*u[1,2]*u[1,2]) / np.power(u[0,0],10)
+    I3 = (u[2,0]*(u[2,1]*u[0,3] - u[1,2]*u[1,2]) -
+        u[1,1]*(u[3,0]*u[0,3] - u[2,1]*u[1,2]) +
+        u[0,2]*(u[3,0]*u[1,2]-u[2,1]*u[2,1])) / np.power(u[0,0],7)
+    
+    return np.array([I1, I2, I3, I1])
 
-    #print(y)
+def circularity(M):
+    """ Calculate the circularity C(S) of a shape given the moments"""
+    eps = 10e-7
+    with np.errstate(invalid='ignore'):
+        U = central_moments(M)
+        denom = 2*np.pi*(U[2,0] + U[0,2])
+        if abs(denom) < eps:
+            return 1.0
+        else:
+            return (U[0,0]*U[0,0]) / denom
+        
 
-    print(len(y))
+def elongation(M):
+    U = central_moments(M)
+    s = U[2,0] + U[0,2]
+    d0 = U[2,0] - U[0,2]
+    d = np.sqrt(4*U[1,1]*U[1,1] + d0*d0)
 
-    # Fit model to data
-    m_init = SersicCurve1D(logI0 = guess_logI0, k = guess_k, n = guess_n)
-    print(m_init)
-    fit = fitting.LevMarLSQFitter()
-    m = fit(m_init, x, y, acc=1e12)
-    print(f'{m}')
-    return m
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return (s + d) / (s - d)
 
-def get_object_parameters(img, node_id, pixel_indices, sig_ancs, nodes, node_attribs, img_coords):
+def mymean(x):
+    if len(x) == 0:
+        return 0
+    else:
+        return np.mean(x)
+
+def smooth(y, box_pts):
+    box_pts = min(box_pts, len(y))
+    if box_pts == 0:
+        return y
+    else:
+        box = np.ones(box_pts)/box_pts
+        y_smooth = np.convolve(y, box, mode='same')
+        return y_smooth
+
+def pixel_corner_points(x, y):
+    """ return an array containing the corner points of a pixel x,y """
+    return np.array([[x,y],[x+1, y],[x+1,y+1],[x,y+1]])
+
+    """ return center of the pixel x,y """
+    #return np.array([[x+0.5,y+0.5]])
+
+def pixel_corner_points(p):
+    return pixel_corner_points(p[0],p[1])
+
+def logbase(n, x):
+    return np.log(x) / np.log(n)
+
+def lerp(a, b, t):
+    return (1 - t)*a + t*b
+
+def fit_exponential(R, Mag, r0, r1, r2):
+    y0 = np.interp(r0, R, Mag)
+    y1 = np.interp(r1, R, Mag)
+    y2 = np.interp(r2, R, Mag)
+
+    b = logbase( (r1-r0)/(r2-r0), (y1-y0)/(y2-y0))
+    a = -(y1-y0) / np.power(r1-r0, b)
+    return (y0, a, b)
+
+def sorted_array_contains(a, v):
+    return a[np.minimum(len(a) - 1, np.searchsorted(a,v))] == v
+
+def get_object_parameters(img, gz_catalogue, plot_dir, node_id, pixel_indices, nodes, node_attribs, img_coords):
+    # skip root object
+    if node_id == 0:
+        return None
+
     """Calculate an object's parameters given the indices of its pixels"""
     p = [node_id]
 
@@ -295,265 +337,312 @@ def get_object_parameters(img, node_id, pixel_indices, sig_ancs, nodes, node_att
     areas = nodes['area']
 
     # Get pixel values for an object
-    pixel_values = np.nan_to_num(img.data[pixel_indices])
-    pixel_nodes = nodes[pixel_indices]
+    #pixel_values = np.nan_to_num(img.data[pixel_indices])
+    #pixel_areas = areas[pixel_indices]
+    #pixel_radii = np.sqrt(pixel_areas)
+    pixel_attribs = node_attribs[pixel_indices]
+    pixel_parents = parents[pixel_indices]
+    num_pixels = len(pixel_attribs)
 
     # get central peak coordinates
-    peak_index = np.argmax(pixel_values)
-    a0, a1 = pixel_indices[0][peak_index], pixel_indices[1][peak_index]
-    current_node_idx, area = nodes[a0, a1]
-
     # calculate ra,dec coordinates of central peak
-    peak_coords = get_pixel_coordinates(np.array([a0, a1]), img_coords)
-    print(f'******************************')
-    print(f'object {node_id}: ra = {peak_coords[0]}, dec = {peak_coords[1]}')
+    peak_index = np.argmax(pixel_attribs['brightness'])
+    peak_brightness = pixel_attribs[peak_index]['brightness']
+    peak_x, peak_y = pixel_indices[0][peak_index], pixel_indices[1][peak_index]
+    peak_coords = get_pixel_coordinates(np.array([peak_y, peak_x]), img_coords)
 
-    # areas and parents for this object
-    pixel_parents = parents[pixel_indices]
-    pixel_areas = areas[pixel_indices]
-    pixel_radii = np.sqrt(pixel_areas)
-    raw_moments = node_attribs[pixel_indices]['moments']
+    # for stripe82 coadd
+    peak_coords[1], peak_coords[0] = peak_coords[0], peak_coords[1]
 
-    ind = np.unravel_index(np.argsort(pixel_radii, axis=None), pixel_radii.shape)[0]
-    ind = ind[0:1000]
+    ra_str = round(peak_coords[0], 4)
+    dec_str = round(peak_coords[1], 4)
 
-    moment_invs = np.empty((len(ind), 4))
+    label_txt = ''
+    if gz_catalogue != None:
+        sky_cat, labels = gz_catalogue
+        s = SkyCoord(peak_coords[0] * u.deg, peak_coords[1]*u.deg)
+        idx, d2d, _ = s.match_to_catalog_sky(sky_cat)
+        lbl = labels[idx].decode('UTF-8')
+        label_txt = f'{lbl}'
+        if d2d > 0.05 * u.arcminute:
+            return None
 
-    for i in range(0, len(moment_invs)):
-        pixel_idx = ind[i]
-        rm = np.reshape(raw_moments[pixel_idx], (4,4))
-        moment_invs[i] = normalized_AMIs(rm, float(pixel_areas[pixel_idx]))
+    print(f'object {node_id} / {label_txt}: x,y={(peak_x, peak_y)},ra,dec = {peak_coords}, area = {num_pixels}')
 
-    # create plots
-    R = pixel_radii[ind]
-    plt.subplot(6,1,1)
-    plt.plot(R, moment_invs[:, 0], '-r')
-    plt.subplot(6,1,2)
-    plt.plot(R, moment_invs[:, 1], '-g')
-    plt.subplot(6,1,3)
-    plt.plot(R, moment_invs[:, 2], '-b')
-    plt.subplot(6,1,4)
-    plt.plot(R, moment_invs[:, 3], '-c')
-    # plt.subplot(6,1,5)
-    # plt.plot(R, moment_invs[:, 4], '-m')
-    # plt.subplot(6,1,6)
-    # plt.plot(R, moment_invs[:, 5], '-y')
-    plt.savefig(f'plots/{node_id}')
-    plt.clf()
+    indices_flat_sorted = np.sort(np.ravel_multi_index(pixel_indices, nodes.shape))
 
-    # log transformed plots
-    moment_invs = log_transform(moment_invs)
-    R = np.log(R)
-    #sm1 = fit_sersic_model_to_invariant(R, moment_invs[:, 0])
-    plt.subplot(6,1,1)
-    #plt.plot(R, sm1(R))
-    plt.plot(R, moment_invs[:, 0], '-r')
-    plt.subplot(6,1,2)
-    plt.plot(R, moment_invs[:, 1], '-g')
-    plt.subplot(6,1,3)
-    plt.plot(R, moment_invs[:, 2], '-b')
-    plt.subplot(6,1,4)
-    plt.plot(R, moment_invs[:, 3], '-c')
-    # plt.subplot(6,1,5)
-    # plt.plot(R, moment_invs[:, 4], '-m')
-    # plt.subplot(6,1,6)
-    # plt.plot(R, moment_invs[:, 5], '-y')
-    plt.savefig(f'plots/{node_id}_log_transformed')
-    plt.clf()
+    R = [] #radius
+    Brightness = [] # intensity
+    Circ = [] #circularity
+    AMI1 = [] # affine moment invariants
+    AMI2 = []
+    AMI3 = []
+    AMI4 = []
+    #Elongation = []
+    Convexity = []
+
+    inside_object = True
+    idx_flat = np.ravel_multi_index(np.array([peak_x, peak_y]), img.shape)
+    min_x, min_y = peak_x, peak_y
+    max_x, max_y = min_x, min_y
+
+    # initialize convex hull
+    # ch_pixels = np.transpose(pixel_indices)
+    # ch_points = np.empty((len(ch_pixels)*4,2))
+    # for i in range(0, len(ch_pixels)):
+    #     ch_points[i*4]    = ch_pixels[i]
+    #     ch_points[i*4+1]  =ch_pixels[i]+[1,0]  
+    #     ch_points[i*4+2]  =ch_pixels[i]+[1,1]
+    #     ch_points[i*4+3]  =ch_pixels[i]+[0,1]
+
+    # ch_points = np.unique(ch_points, axis=0)
+    # CH = ConvexHull(points=ch_points)
+    # convexity=len(ch_pixels)/CH.volume
+
+    br_sorted_indices = pixel_attribs['brightness'].argsort()[::-1]
+    Convexity_Brightness = []
+    ch_pixels = np.transpose(pixel_indices)
+    ch_points = set()
+    ch_area = 0
+
+    # re-calculate CH a max of 250 times 
+    ch_use_indices = np.round(np.linspace(0, len(ch_pixels) - 1, min(150, len(ch_pixels-1))).astype(int))
+    ch_use_current_index = 0
+
+    for i in range(0, len(ch_pixels)):
+        px,py = ch_pixels[i][0], ch_pixels[i][1]
+        ch_points.add((px  , py  ))
+        ch_points.add((px+1, py  ))
+        ch_points.add((px+1, py+1))
+        ch_points.add((px  , py+1))
+
+        ch_area += 1
+
+        if ch_use_indices[ch_use_current_index] == i:
+            Convexity_Brightness.append(pixel_attribs[br_sorted_indices[i]]['brightness'])
+            Convexity.append(ch_area/ConvexHull(points=list(ch_points)).volume)
+            ch_use_current_index += 1
 
 
-    # indices_ravelled = np.ravel_multi_index(pixel_indices, nodes.shape)
+    ''' Traverse object from central peak to faintest regions '''
+    while idx_flat > 0 and sorted_array_contains(indices_flat_sorted, idx_flat):
+        cur_node_idx = np.unravel_index(idx_flat, img.shape)
+        min_x = min(min_x, cur_node_idx[0])                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+        max_x = max(max_x, cur_node_idx[0])
+        min_y = min(min_y, cur_node_idx[1])
+        max_y = max(max_y, cur_node_idx[1])
 
-    # step_count = 1
-    # inside_object = True
-    # spans = 1
+        attribs = node_attribs[cur_node_idx]
+        b = attribs['brightness']
 
-    # node_power = node_attribs[a0, a1]['power']
-    # node_intensity = pixel_values[peak_index]
-    # print(f'in {step_count}. i={pixel_values[peak_index]} area={area}. power = {node_power}')
+        M = np.reshape(attribs['moments'], (4,4))
 
-    # traversed_nodes_pixels = []
+        #CH.add_points(pixel_corner_points(*cur_node_idx))
+        #print(f'good={CH.good} cur_node_idx={cur_node_idx} ch.area={CH.volume}')
 
-
-    # while current_node_idx >= 0 and inside_object:
-    #     prev_power = node_power
-    #     prev_intensity = node_intensity
-    #     next_i, next_j = np.unravel_index(current_node_idx, nodes.shape)
-    #     next_node_idx, area = nodes[next_i, next_j]
-
-    #     if current_node_idx in indices_ravelled:
-    #         step_count += 1
-    #         pixels_in_node = pixel_parents[pixel_parents == next_node_idx]
-    #         areas_in_node = pixel_areas[pixel_parents == next_node_idx]
-
-    #         #all_pixels_in_node = parents[parents == next_node_idx]
-    #         #all_areas_in_node = areas[parents == next_node_idx]
-
-    #         detection_level = node_attribs[next_i, next_j]['detection_level']
-
-    #         moments = np.reshape(node_attribs[next_i, next_j]['moments'], (4,4))
-    #         invs = flusser_invariants(moments, float(area))
-    #         #print(log_transform(invs))
-
-    #         node_intensity = img.data[next_i, next_j]
-    #         delta_intensity = (prev_intensity - node_intensity) / area
-
-    #         traversed_nodes_pixels.extend(pixels_in_node.tolist())
-    #         s = pixels_in_node.size
-    #         print(f'in {step_count}. dl = {detection_level}. area={area}, \
-    #         {areas_in_node}')
-    #         spans += s
-    #     else:
-    #         inside_object = False
+        R.append(np.sqrt(areas[cur_node_idx]/np.pi))
+        Brightness.append(b)
+        Circ.append(circularity(M))
+        #Elongation.append(elongation(M))
         
-    #     current_node_idx = next_node_idx
 
-    # print(f'traversed {step_count} nodes. spans = {spans}. have {pixel_values.size} pixels')
-    # numDelta = pixel_values[pixel_values == np.max(pixel_values)].size
-    # print(f'delta = {numDelta}')
-    # print(f'range={np.max(pixel_values) - np.min(pixel_values)}')
+        amis = normalized_AMIs(M)
+        amis = log_transform(amis)
+        AMI1.append(amis[0])
+        AMI2.append(amis[1])
+        AMI3.append(amis[2])
+        AMI4.append(amis[3])
 
-    #get_object_node_invs(img, pixel_indices)
+        ''' move up the tree '''
+        idx_flat = parents[cur_node_idx]
 
-    # Subtract min values if required
-    pixel_values -= max(np.min(pixel_values), 0)
+    R = np.array(R)
+    Brightness = np.array(Brightness)
+    Mag = log_transform(np.array(Brightness))
+    with np.errstate(divide='ignore'):
+        Mag_Normal = Mag / np.max(Mag)
+    #Convexity_Brightness = np.log(pixel_attribs[br_sorted_indices]['brightness']+1)[:ch_area]
 
-    flux_sum = np.sum(pixel_values)
 
-    # Handle situations where flux_sum is 0 because of minimum subtraction
-    if flux_sum == 0:
-        almost_zero = np.nextafter(flux_sum,1)
-        flux_sum = almost_zero
-        pixel_values[pixel_values == 0] = almost_zero
+    ''' finish incremental processing of the convex hull '''
+    #NP = int(len(R)/4)
+    #s1 = Sersic1D(amplitude=np.sum(Brightness[:NP])*0.5, r_eff=R[-1]*0.5, n=1, fixed={'n': False}, 
+    #    bounds={'r_eff': (R[0],R[-1])})
+    #fit_sersic = fitting.LevMarLSQFitter()
+    #sersic_model = fit_sersic(s1, R[:NP], Brightness[:NP], maxiter=250)
 
-    # Get first-order moments
-    f_o_m = get_first_order_moments(pixel_indices, pixel_values, flux_sum)
-    p.extend(f_o_m)
+    #smooth data
+    #AMI1 = smooth(AMI1, 3)
+    #AMI2 = smooth(AMI2, int(len(R)/8))
+    #AMI3 = smooth(AMI3, int(len(R)/8))
+    #AMI4 = smooth(AMI4, int(len(R)/8))
 
-    # Get second-order moments
-    second_order_moments = [*get_second_order_moments(pixel_indices, pixel_values, flux_sum, *f_o_m)]
-    p.extend(second_order_moments)
+    #print(Circ)
+    # obtain features
+    #features = get_features(R, moment_invs)
 
-    p.append(flux_sum)
-    p.extend(get_basic_stats(pixel_values))
+    # create cutout
+    #cutout_size = max_x-min_x+1, max_y-min_y+1
+    #cutout = Cutout2D(img.data, (peak_y,peak_x), size=cutout_size, mode='partial', fill_value=0.0)
 
-    radii, half_max = get_light_distribution(pixel_values, flux_sum)
-    p.append(half_max)
-    p.extend(radii)
+    # K = np.transpose(pixel_indices)
+    # K_min_x = np.min(K[:,0])
+    # K_max_x = np.max(K[:,0])
+    # K_min_y = np.min(K[:,1])
+    # K_max_y = np.max(K[:,1])
+
+    # K -= K_min_x, K_min_y
+    # cutout = np.zeros((K_max_x-K_min_x+1, K_max_y-K_min_y+1))
+    # min_brightness = 50000
+    # max_brightness = -10000
+
+    # for i in range(0, len(K[:,0])):
+    #     K_x = K[i,0]
+    #     K_y = K[i,1]
+    #     node_br = node_attribs[K_x+K_min_x, K_y+K_min_y]['brightness']
+    #     node_br = np.log(node_br + 1)
+    #     min_brightness = min(min_brightness, node_br)
+    #     max_brightness = max(max_brightness, node_br)
+    #     cutout[K_x, K_y] = node_br
+
+    # delta = max_brightness - min_brightness
+    # if delta > 0:
+        # for i in range(0, len(K[:,0])):
+            # K_x = K[i,0]
+            # K_y = K[i,1]
+            # min_val = 0.01
+            # node_br = node_attribs[K_x+K_min_x, K_y+K_min_y]['brightness']
+            # cutout[K_x, K_y] = min_val + (1-min_val) * node_br / delta
+    
+    # fit exponential curves
+    r0 = R[0]
+    r1 = lerp(R[0], R[-1], 0.075)
+    r2 = lerp(R[0], R[-1], 0.15)
+
+    r3 = lerp(R[0], R[-1], 0.15)
+    r4 = lerp(R[0], R[-1], 0.375)
+    r5 = lerp(R[0], R[-1], 0.60)
+
+    r6 = lerp(R[0], R[-1], 0.60)
+    r7 = lerp(R[0], R[-1], 0.80)
+    r8 = R[-1]
+
+    ey0, ea, eb = ep0 = fit_exponential(R, Mag, r0, r1, r2)
+    fy0, fa, fb = ep1 = fit_exponential(R, Mag, r3, r4, r5)
+    gy0, ga, gb = ep2 = fit_exponential(R, Mag, r6, r7, r8)
+
+    if plot_dir is not None:
+        object_plot_dir_name=f'{plot_dir}/{label_txt}/{ra_str},{dec_str}'
+        os.makedirs(object_plot_dir_name, exist_ok=True)
+
+        #plt.subplot(1,1,1)
+        #plt.imshow(cutout, origin='lower', interpolation='bicubic')
+        #plt.savefig(f'{object_plot_dir_name}/cutout.png')
+        #plt.clf()
+
+        plt.rc('text', usetex=True)
+        plt.rc('font', family='serif')
+
+        plt.grid(True)
+        plt.ylabel(r'$\log I$')
+        plt.xlabel(r'$r$')
+        plt.plot(R, Mag)
+        #plt.plot(R, log_transform(sersic_model(R)))
+        plt.savefig(f'{object_plot_dir_name}/brightness.pdf')
+        plt.clf()
+
+        plt.grid(True)
+        plt.ylabel(r'$\log I$')
+        plt.xlabel(r'$r$')
+        plt.plot(R, Mag, linewidth = 3, alpha = 0.7)
+        plt.plot(R[R <= r2], ey0 - ea* np.power(R[R <= r2]-r0, eb), '--k')
+        Rbetween = R[np.logical_and(R >= r3, R <= r6)]
+        plt.plot(Rbetween, fy0 - fa* np.power(Rbetween-r3, fb), ':k')
+        plt.plot(R[R >= r6], gy0 - ga* np.power(R[R >= r6]-r6, gb), '-.k')
+        plt.savefig(f'{object_plot_dir_name}/fit_brightness.pdf')
+        plt.clf() 
+
+        plt.grid(True)
+        plt.ylabel(r'$\textbf{Circularity}$')
+        plt.xlabel(r'$r$')
+        plt.plot(R, Circ)
+        plt.savefig(f'{object_plot_dir_name}/circ.pdf')
+        plt.clf()
+
+        # plt.grid(True)
+        # plt.ylabel('')
+        # plt.xlabel('Radius')
+        # plt.plot(R, Mag_Normal, label='Normalized mag')
+        # plt.plot(R, Elongation, label='Elongation')
+        # plt.legend()
+        # plt.savefig(f'{object_plot_dir_name}/elong.png')
+        # plt.clf()
+
+        plt.grid(True)
+        plt.ylabel(r'\textbf{Convexity}')
+        plt.xlabel(r'$\log(I)$')
+        plt.plot(Convexity_Brightness, Convexity)
+        plt.gca().invert_xaxis()
+        plt.savefig(f'{object_plot_dir_name}/convexity.pdf')
+        plt.clf()    
+
+        plt.grid(True)
+        plt.ylabel(r'\textbf{AMI}')
+        plt.xlabel(r'$r$')
+        plt.plot(R, AMI1, '-')
+        plt.plot(R, AMI2, '--')
+        plt.plot(R, AMI3, '-')
+        plt.plot(R, AMI4, '--')
+        plt.savefig(f'{object_plot_dir_name}/ami.pdf')
+        plt.clf()    
+
+    p.append(num_pixels)
+    p.append(label_txt)
+    p.append(ra_str)
+    p.append(dec_str)
+
+    p.extend(get_features(R, Mag, Circ, Convexity_Brightness, Convexity, (AMI1, AMI2, AMI3, AMI4), (ep0, ep1, ep2)))
 
     return p
 
+def get_features(r, mag, circ, ch_brightness, conv, amis, brightness_params):
+    fts = []
 
-def get_basic_stats(pixel_values):
-    """Return basic statistics about a pixel distribution"""
-    return np.max(pixel_values), np.median(pixel_values), np.mean(pixel_values)
+    min_mag = np.min(mag)
+    rlog = np.log(r)
 
+    ''' brightness features '''
+    ey0, ea, eb = brightness_params[0]
+    fy0, fa, fb = brightness_params[1]
+    gy0, ga, gb = brightness_params[2]
 
-def get_first_order_moments(indices, values, flux_sum):
-    """Find the weighted centre of the object"""
+    ey0 -= min_mag
+    fy0 -= min_mag
+    gy0 -= min_mag
 
-    x = np.dot(indices[1], values)/flux_sum
-    y = np.dot(indices[0], values)/flux_sum
+    br_features_1 = np.array([ea, fy0, fa, gy0, ga]) / ey0
+    fts.extend(br_features_1)
 
-    return x, y
+    br_features_2 = [eb, fb, gb]
+    fts.extend(br_features_2)
 
+    ''' circularity features '''
+    circ_features = np.interp(np.linspace(r[0], r[-1], FTS_NUM_POINTS), r, circ)
+    circ_log_features = np.interp(np.linspace(rlog[0], rlog[-1], FTS_NUM_POINTS), rlog, circ)
 
-def get_second_order_moments(indices, values, flux_sum, x, y):
-    """Find the second order moments of the object"""
-    x_indices = indices[1]
-    y_indices = indices[0]
+    fts.extend(circ_features)
+    fts.extend(circ_log_features)
 
-    x_pows = np.power(x_indices,2)
-    y_pows = np.power(y_indices,2)
+    ''' convexity features. note: ch_brightness is decreasing so need to flip'''
+    conv_features = np.interp(np.linspace(ch_brightness[-1], ch_brightness[0], FTS_NUM_POINTS), ch_brightness[::-1], conv[::-1])
+    fts.extend(conv_features)
 
-    # Find the second order moments
-    x2 = (np.sum(np.dot(x_pows, values))/flux_sum) - np.power(x, 2)
-    y2 = (np.sum(np.dot(y_pows, values))/flux_sum) - np.power(y, 2)
-    xy = (np.sum(x_indices * values * y_indices)/flux_sum) - (x * y)
+    ''' ami features.  '''
+    for i in range(0, 4):
+        ami_i_features = np.interp(np.linspace(r[0], r[-1], FTS_NUM_POINTS), r, amis[i])
+        fts.extend(ami_i_features)
+        
+        ami_i_log_features = np.interp(np.linspace(rlog[0], rlog[-1], FTS_NUM_POINTS), rlog, amis[i])
+        fts.extend(ami_i_log_features)
 
-    lhs = (x2 + y2)/2
-    rhs = np.sqrt(np.power((x2 - y2)/2, 2) + np.power(xy,2))
-
-    # Find the major/minor axes
-    with np.errstate(invalid='raise'):
-        try:
-            major_axis = np.sqrt(lhs + rhs)
-        except:
-            major_axis = 0
-
-        try:
-            minor_axis = np.sqrt(lhs - rhs)
-        except:
-            minor_axis = 0
-
-    # Solve for theta - major axis angle
-    try:
-        t = np.arctan((2 * xy) / (x2 - y2))
-    except RuntimeWarning:
-        t = 0
-
-    # Shift theta to the correct value
-    if xy < 0 < t:
-        theta = (t - np.pi)/2
-    elif t < 0 < xy:
-        theta = (t + np.pi)/2
-    else:
-        theta = t/2
-
-    # # Calculate kurtosis
-    # if major_axis < 10:
-    #     x4 = (x_indices - x) ** 4
-    #     y4 = (y_indices - y) ** 4
-    #
-    #     X4, Y4 = np.meshgrid(x4, y4)
-    #
-    #     m4x = np.sum(values * X4) / flux_sum
-    #     m4y = np.sum(values * Y4) / flux_sum
-    #
-    #     sx = np.sqrt(x2 + np.power(x, 2))
-    #     sy = np.sqrt(y2 + np.power(y, 2))
-    #
-    #     kx = m4x / sx ** 4
-    #     ky = m4y / sy ** 4
-    #
-    #     kurtosis = (kx + ky) / 2
-    # else:
-    #     kurtosis = -99
-
-    return major_axis, minor_axis, theta
-
-
-def get_light_distribution(pixel_values, flux_sum):
-
-    # Sort pixels into order
-    sorted_pixels = np.sort(pixel_values)
-
-    # Half maximum radius
-
-    # Find half the maximum pixel value
-    half_max = np.max(pixel_values) * 0.5
-
-    # Find the number of pixels of at least that value
-    area = sorted_pixels.size - np.searchsorted(sorted_pixels, half_max)
-    half_max_rad = find_radius(area)
-
-    # Nth percentile area
-
-    # Get the cumulative sums of the reverse sorted pixels
-    summed_pixels = np.cumsum(sorted_pixels[::-1])
-
-    # Find the flux contained by n% of the object's pixels
-    thresholds = np.array([0.5, 0.1, 0.9]) * flux_sum
-
-    # Find the first instance where the cumulative sum is over each threshold
-    areas = np.searchsorted(summed_pixels, thresholds)
-
-    # Convert the areas to approximate radii
-    radii = find_radius(areas)
-    
-    return radii, half_max_rad
-
-
-def find_radius(area):
-    """Calculate the radius of a circle of a given radius"""
-    return np.sqrt(area/np.pi)
+    return fts

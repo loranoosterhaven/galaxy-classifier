@@ -1,0 +1,29 @@
+As part of the GZ2 data release (Tables 5–9), we provide a
+short abbreviation (gz2 class) that indicates the most common consensus classification for the galaxy. We emphasise
+that the intent is not to create a new classification system;
+rather, this is only a convenient shorthand for interpreting
+portions of the GZ2 results.
+The gz2 class string is generated for each galaxy by
+taking the largest debiased vote fraction (beginning with
+Task 01) and selecting the most common response for each
+subsequent task in the decision tree.
+Galaxies that are smooth (from Task 01) have gz2 class
+strings beginning with ‘E’. Their degree of roundness (completely round, in-between, and cigar-shaped) is represented
+by ‘r’,‘i’, and ‘c’, respectively.
+Galaxies with features/disks have gz2 class strings beginning with ‘S’. Edge-on disks follow this with ‘er’, ‘eb’, or
+‘en’ (with the second letter classifying the bulge shape as
+round, boxy, or none). For oblique disks, the letter following
+‘S’ is an upper-case ‘B’ if the galaxies have a bar. The bulge
+prominence (‘d’ = none, ‘c’ = just noticeable, ‘b’ = obvious,
+‘a’ = dominant). Both bars and bulges follow the same general trends as the Hubble sequence, although the correspondence is not exact. If spiral structure was identified, then
+the string includes two characters indicating the number
+(1, 2, 3, 4, +, ?) and relative winding (‘t’=tight, ‘m’=medium,
+‘l’=loose) of the spiral arms.
+Finally, any feature in the galaxy the users identified
+as “odd” appears at the end of the string in parentheses:
+‘(r)’=ring, ‘(l)’=lens/arc, ‘(d)’=disturbed, ‘(i)’=irregular,
+‘(o)’=other, ‘(m)’=merger, ‘(u)’=dust lane.
+Objects that are stars or artifacts have the gz2 class string ‘A’.
+For example: • Er = smooth galaxy, completely round • SBc2m = barred disk galaxy with a just noticeable bulge
+and two medium-wound spiral arms • Seb = edge-on disk galaxy with a boxy bulge • Sc(I) = disk galaxy with a just noticeable bulge, no
+spiral structure, and irregular morphology. • A = star

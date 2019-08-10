@@ -8,6 +8,8 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
+#define MAX(a,b) (((a)>(b))?(a):(b))
+
 const int mt_conn_12[MT_CONN_12_HEIGHT * MT_CONN_12_WIDTH] =
 {
   0, 0, 1, 0, 0,
@@ -78,13 +80,15 @@ static void mt_init_nodes(mt_data* mt)
 
     FLOAT_TYPE y = i / mt->img.width;
     FLOAT_TYPE x = i % mt->img.width;
-    for (SHORT_TYPE p = 0; p <= MOMENTS_ORDER; p++) 
+    mt->nodes_attributes[i].brightness = mt->img.data[i];
+
+    for (INT_TYPE p = 0; p < MOMENTS_ORDER+1; p++) 
     {
-      for (SHORT_TYPE q = 0; q <= MOMENTS_ORDER; q++) 
+      for (INT_TYPE q = 0; q < MOMENTS_ORDER+1; q++) 
       {
-          INT_TYPE moment_index = p * (MOMENTS_ORDER + 1) + q;
+          INT_TYPE moment_index = q * (MOMENTS_ORDER + 1) + p;
           mt->nodes_attributes[i].moments[moment_index] =
-            pow(x,p)*pow(y,q) /* * mt->img.data[i]; */;
+            pow(x,p)*pow(y,q);
       }
     }
   }
@@ -203,12 +207,12 @@ static void mt_merge_nodes(mt_data* mt,
   merge_from_attr->volume += delta * merge_from->area;
   merge_to_attr->volume += merge_from_attr->volume;
 
-  // same as MIN(mt->img.data[merge_from_idx], mt->img.data[merge_to_idx])
-  merge_from_attr->detection_level = mt->img.data[merge_to_idx]; 
-  merge_to_attr->detection_level = merge_from_attr->detection_level;
+  float d = MAX(mt->img.data[merge_from_idx], mt->img.data[merge_to_idx]);
+  
+  merge_to_attr->brightness = d;
 
   // moments
-  for (SHORT_TYPE i = 0; i < (MOMENTS_ORDER-1)*(MOMENTS_ORDER-1); i++) {
+  for (INT_TYPE i = 0; i < (MOMENTS_ORDER+1)*(MOMENTS_ORDER+1); i++) {
     merge_to_attr->moments[i] += merge_from_attr->moments[i];
   }
 }

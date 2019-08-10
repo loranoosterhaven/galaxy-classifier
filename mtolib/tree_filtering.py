@@ -104,4 +104,4 @@ def filter_tree_timed(mt_in, image, params, sig_test=default_sig_test,
     mto_lib.mt_objects.argtypes = [ct.POINTER(mt_class.MtObjectData)]
     mto_lib.mt_objects(mto_pointer)
 
-    return object_ids, sig_ancs
+    return object_ids

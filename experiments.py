@@ -61,8 +61,14 @@ def plot_relevances(title, cols, relevances):
    y_ticks = np.vectorize(lambda x: x.replace('_', '\_'))(y_ticks)
    y_ticks = np.vectorize(lambda x: '\\texttt{%s}' % x)(y_ticks)
 
+   rel_profile = np.abs(np.mean(relevances, axis=0))
+   # rel_profile = rel_profile / np.sum(rel_profile)
+   print(f'sum is {np.sum(rel_profile)}')
+
+   rel_errs = np.var(relevances, axis=0)
+
    y_pos = np.arange(0, relevances.shape[1])
-   ax.barh(y_pos, np.abs(np.mean(relevances, axis=0)), xerr=np.var(relevances, axis=0), align='center')
+   ax.barh(y_pos, rel_profile, xerr=rel_errs, align='center')
    ax.set_title('\\texttt{%s}' % title)
    ax.set_yticks(y_pos)
    ax.set_yticklabels(y_ticks)
@@ -126,7 +132,10 @@ def do_experiment(title, cols, labels):
       
       score = gmlvq.score(data[test], labels[test])
       scores[i] = score
-      relevances[i] = np.diag(gmlvq.omega_)
+
+      relMatrix = np.dot(np.transpose(gmlvq.omega_), gmlvq.omega_)
+
+      relevances[i] = np.diag(relMatrix)
 
       label_pred = gmlvq.predict(data[test])
       avg_cm += confusion_matrix(labels[test], label_pred)
